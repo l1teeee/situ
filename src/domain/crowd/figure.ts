@@ -1,0 +1,24 @@
+export type Figure = {
+  id: string;
+  x: number;
+  y: number;
+  outlinePath: string;
+  eyesPath: string;
+  eyeWidth: number;
+  linesPath: string;
+  faceX: number;
+  faceY: number;
+  faceTilt: number;
+  focusY: number;
+  color: string;
+  swayPhase: number;
+  happyEyesPath: string;
+  happyLinesPath: string;
+  armPath: string;
+  armLeftX: number;
+  armRightX: number;
+  armY: number;
+  armAngle: number;
+  partyColor: string;
+  handColor: string;
+};
