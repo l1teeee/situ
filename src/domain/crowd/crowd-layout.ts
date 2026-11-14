@@ -85,7 +85,9 @@ function buildRow(layout: Layout, row: number): Figure[] {
 
 export function buildCrowd(viewport: { width: number; height: number; seed: number }): Crowd {
   const { width, height, seed } = viewport;
-  const cell = clamp(width / 12.5, 64, 150);
+  // Narrow or tall screens: at least 4 cells across and about 11 visible rows,
+  // so phones get readable figures instead of a wall of tiny faces.
+  const cell = clamp(Math.max(width / 12.5, Math.min(width / 4, height / 8)), 64, 150);
   const rowStep = cell * 0.6;
   const topMargin = cell * 1.3;
   const strokeWidth = clamp(cell * 0.0145, 1.2, 2);
