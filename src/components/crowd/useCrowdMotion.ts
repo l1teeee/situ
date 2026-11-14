@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, type MouseEvent, type PointerEvent, type RefObject } from "react";
 import gsap from "gsap";
-import { applyFrame, createEntry, resetEntry } from "@/components/crowd/figureEntry";
+import { createEntry, drawFigure } from "@/components/crowd/figureEntry";
+import { readThemeColor, rgbToCss } from "@/components/crowd/crowdColors";
+import type { ElementSize } from "@/components/crowd/useElementSize";
 import {
   CELEBRATION_SECONDS, SKY_COLORS, celebrationAmount, celebrationPose, rippleDelay, skyEnvelope,
   type Celebration,
@@ -10,9 +12,14 @@ import {
 import type { Crowd } from "@/domain/crowd/crowd-layout";
 import { idlePose, RESTING_IDLE } from "@/domain/crowd/idle";
 import { roundCoordinate } from "@/domain/crowd/geometry";
+import { BODY_DEPTH } from "@/domain/crowd/silhouette";
 import {
   approachInfluence, figurePose, PIVOT_DEPTH, targetInfluence, type FigurePose, type Pointer,
 } from "@/domain/crowd/influence";
+
+// Canvas raster cost grows with backing pixels, and phones have the weakest GPUs.
+const MAX_PIXEL_RATIO = 2;
+const MAX_TOUCH_PIXEL_RATIO = 1.5;
 
 type FieldState = {
   pointer: Pointer | null;
@@ -26,11 +33,13 @@ type FieldState = {
   clickCount: number;
   skyColor: string | null;
   skyOpacity: number;
+  entranceStart: number | null;
+  entrancePlayed: boolean;
 };
 
 const RESTING_POSE: FigurePose = { offsetY: 0, rotation: 0, lookX: 0, lookY: 0 };
 
-function updateSky(sky: SVGRectElement, state: FieldState, time: number): void {
+function updateSky(state: FieldState, time: number): void {
   let amount = 0;
   for (const { celebration, endTime } of state.celebrations) {
     amount = Math.max(amount, skyEnvelope(time - celebration.startTime, endTime - celebration.startTime));
@@ -38,11 +47,9 @@ function updateSky(sky: SVGRectElement, state: FieldState, time: number): void {
   const opacity = Math.round(amount * 100) / 100;
   const color = state.celebrations[state.celebrations.length - 1]?.skyColor;
   if (color !== undefined && color !== state.skyColor) {
-    sky.setAttribute("fill", color);
     state.skyColor = color;
   }
   if (opacity !== state.skyOpacity) {
-    sky.setAttribute("opacity", String(opacity));
     state.skyOpacity = opacity;
   }
 }
@@ -55,7 +62,8 @@ function wake(state: FieldState) {
   }
 }
 
-export function useCrowdMotion(svgRef: RefObject<SVGSVGElement | null>, crowd: Crowd | null) {
+export function useCrowdMotion(canvasRef: RefObject<HTMLCanvasElement | null>, crowd: Crowd | null,
+  size: ElementSize | null) {
   const field = useRef<FieldState>({
     pointer: null,
     lastPointer: { x: 0, y: 0 },
@@ -68,24 +76,33 @@ export function useCrowdMotion(svgRef: RefObject<SVGSVGElement | null>, crowd: C
     clickCount: 0,
     skyColor: null,
     skyOpacity: 0,
+    entranceStart: null,
+    entrancePlayed: false,
   });
 
   useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg || !crowd) return;
-    const sky = svg.querySelector<SVGRectElement>('[data-part="sky"]');
-    if (!sky) {
-      throw new Error("Crowd missing sky");
-    }
+    const canvas = canvasRef.current;
+    if (!canvas || !crowd || !size) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Crowd canvas has no 2D context");
+    const coarsePointer = window.matchMedia("(pointer: coarse)").matches;
+    const dpr = Math.min(window.devicePixelRatio, coarsePointer ? MAX_TOUCH_PIXEL_RATIO : MAX_PIXEL_RATIO);
+    canvas.width = Math.round(size.width * dpr);
+    canvas.height = Math.round(size.height * dpr);
+    const background = readThemeColor("--color-background");
+    const foreground = rgbToCss(readThemeColor("--color-foreground"));
     const state = field.current;
     state.cell = crowd.cell;
-    const elements = new Map(
-      Array.from(svg.querySelectorAll<SVGGElement>("[data-figure]"), (element) => [
-        element.dataset.figure,
-        element,
-      ]),
-    );
-    const entries = crowd.figures.map((figure) => createEntry(figure, elements));
+    const sorted = [...crowd.figures].sort((a, b) => b.y - a.y || a.x - b.x);
+    const delays = new Map(sorted.map((figure, index) => [
+      figure.id, index * Math.min(0.04, 2.5 / crowd.figures.length),
+    ]));
+    const entries = crowd.figures.map((figure) => createEntry(figure, delays.get(figure.id)!));
+    const playEntrance = !state.entrancePlayed;
+    if (playEntrance) {
+      state.entrancePlayed = true;
+      state.entranceStart = null;
+    }
     const pivotY = roundCoordinate(PIVOT_DEPTH * crowd.cell);
     let idleTime = 0;
     const tick: gsap.TickerCallback = (time, deltaTime) => {
@@ -99,30 +116,47 @@ export function useCrowdMotion(svgRef: RefObject<SVGSVGElement | null>, crowd: C
       }
       state.pendingClicks = [];
       state.celebrations = state.celebrations.filter((entry) => entry.endTime > time);
-      updateSky(sky, state, time);
+      updateSky(state, time);
       const celebrations = state.celebrations.map((entry) => entry.celebration);
-      let anyActive = false;
+      if (playEntrance && state.entranceStart === null) state.entranceStart = time;
+      const elapsed = playEntrance ? time - state.entranceStart! : Infinity;
+      let anyActive = state.motionScale !== 0;
+      let entranceActive = false;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "black";
+      ctx.fillRect(0, 0, size.width, size.height);
+      if (state.skyOpacity > 0 && state.skyColor !== null) {
+        ctx.globalAlpha = state.skyOpacity;
+        ctx.fillStyle = state.skyColor;
+        ctx.fillRect(0, 0, size.width, size.height);
+      }
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = foreground;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
       for (const entry of entries) {
         const target = targetInfluence(entry.figure, state.pointer, crowd.cell);
         const envelope = celebrationAmount(entry.figure, celebrations, time, crowd.cell);
         if (target !== 0 || entry.influence !== 0) {
           entry.influence = approachInfluence(entry.influence, target, deltaTime / 1000);
         }
-        if (state.motionScale === 0 && entry.influence === 0 && envelope === 0) {
-          if (entry.active) {
-            resetEntry(entry);
-          }
-          continue;
-        }
-        anyActive = true;
+        if (entry.influence !== 0 || envelope > 0) anyActive = true;
         const hover = entry.influence > 0
           ? figurePose(entry.figure, state.lastPointer, entry.influence, time, crowd.cell, state.motionScale)
           : RESTING_POSE;
         const party = celebrationPose(entry.figure, envelope, time, crowd.cell, state.motionScale);
         const idle = state.motionScale === 0 ? RESTING_IDLE : idlePose(entry.figure, idleTime, crowd.cell);
-        applyFrame(entry, { hover, party, idle, envelope, influence: entry.influence }, pivotY);
+        const progress = state.motionScale === 0
+          ? 1 : Math.max(0, Math.min(1, (elapsed - entry.entranceDelay) / 0.45));
+        const entrance = 1 - (1 - progress) ** 5;
+        if (progress < 1) entranceActive = true;
+        drawFigure(entry, { hover, party, idle, envelope, influence: entry.influence },
+          { ctx, pivotY, strokeWidth: crowd.strokeWidth, background, entrance },
+          { x: entry.figure.x, y: entry.figure.y + BODY_DEPTH * crowd.cell });
       }
-      if (!anyActive && state.pointer === null && !state.celebrations.length && !state.pendingClicks.length) {
+      if (!anyActive && !entranceActive && state.pointer === null &&
+        !state.celebrations.length && !state.pendingClicks.length) {
         gsap.ticker.remove(tick);
         state.awake = false;
       }
@@ -151,22 +185,16 @@ export function useCrowdMotion(svgRef: RefObject<SVGSVGElement | null>, crowd: C
       state.pointer = null;
       state.celebrations = [];
       state.pendingClicks = [];
-      sky.setAttribute("opacity", "0");
       state.skyOpacity = 0;
       state.skyColor = null;
-      for (const entry of entries) {
-        if (entry.active) {
-          resetEntry(entry);
-        }
-      }
     };
-  }, [svgRef, crowd]);
+  }, [canvasRef, crowd, size]);
 
-  function onPointerMove(event: PointerEvent<SVGSVGElement>) {
-    const svg = svgRef.current;
+  function onPointerMove(event: PointerEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
     const state = field.current;
-    if (!svg || !state.tick) return;
-    const bounds = svg.getBoundingClientRect();
+    if (!canvas || !state.tick) return;
+    const bounds = canvas.getBoundingClientRect();
     const pointer = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
     state.pointer = pointer;
     state.lastPointer = pointer;
@@ -177,17 +205,17 @@ export function useCrowdMotion(svgRef: RefObject<SVGSVGElement | null>, crowd: C
     field.current.pointer = null;
   }
 
-  function onPointerUp(event: PointerEvent<SVGSVGElement>) {
+  function onPointerUp(event: PointerEvent<HTMLCanvasElement>) {
     if (event.pointerType === "touch") {
       field.current.pointer = null;
     }
   }
 
-  function onClick(event: MouseEvent<SVGSVGElement>) {
-    const svg = svgRef.current;
+  function onClick(event: MouseEvent<HTMLCanvasElement>) {
+    const canvas = canvasRef.current;
     const state = field.current;
-    if (!svg || !state.tick) return;
-    const bounds = svg.getBoundingClientRect();
+    if (!canvas || !state.tick) return;
+    const bounds = canvas.getBoundingClientRect();
     const origin = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
     const reach = Math.max(
       Math.hypot(origin.x, origin.y),

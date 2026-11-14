@@ -14,19 +14,6 @@ body {
   font-family: var(--font-sans);
 }
 
-@keyframes crowd-entrance {
-  from { opacity: 0; transform: translateY(18px) scale(0.94); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .crowd-entrance {
-    transform-box: fill-box;
-    transform-origin: center bottom;
-    animation: crowd-entrance 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
-  }
-}
-
 /* Static film grain over the whole page; it never takes pointer events. */
 .grain {
   position: absolute;

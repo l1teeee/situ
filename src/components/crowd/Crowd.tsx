@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import CrowdFigure from "@/components/crowd/CrowdFigure";
 import { useElementSize } from "@/components/crowd/useElementSize";
 import { useCrowdMotion } from "@/components/crowd/useCrowdMotion";
 import { buildCrowd } from "@/domain/crowd/crowd-layout";
@@ -10,17 +9,13 @@ const CROWD_SEED = 20261113;
 
 export default function Crowd() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const size = useElementSize(containerRef);
   const crowd = useMemo(
     () => (size ? buildCrowd({ width: size.width, height: size.height, seed: CROWD_SEED }) : null),
     [size],
   );
-  const entranceOrder = useMemo(() => {
-    const figures = [...(crowd?.figures ?? [])].sort((a, b) => b.y - a.y || a.x - b.x);
-    return new Map(figures.map((figure, index) => [figure.id, index]));
-  }, [crowd]);
-  const pointerHandlers = useCrowdMotion(svgRef, crowd);
+  const pointerHandlers = useCrowdMotion(canvasRef, crowd, size);
 
   useEffect(() => {
     function playWelcome() {
@@ -57,27 +52,12 @@ export default function Crowd() {
 
   return (
     <div ref={containerRef} className="h-full w-full">
-      <svg
-        ref={svgRef}
+      <canvas
+        ref={canvasRef}
         aria-hidden="true"
-        className="block h-full w-full touch-none select-none fill-background stroke-foreground"
-        strokeWidth={crowd?.strokeWidth}
-        strokeLinecap="round"
-        strokeLinejoin="round"
+        className="block h-full w-full touch-none select-none"
         {...pointerHandlers}
-      >
-        <rect width="100%" height="100%" fill="black" stroke="none" />
-        <rect data-part="sky" width="100%" height="100%" stroke="none" opacity={0} />
-        {crowd?.figures.map((figure) => (
-          <g
-            key={figure.id}
-            className="crowd-entrance"
-            style={{ animationDelay: `${entranceOrder.get(figure.id)! * Math.min(0.04, 2.5 / crowd.figures.length)}s` }}
-          >
-            <CrowdFigure figure={figure} />
-          </g>
-        ))}
-      </svg>
+      />
     </div>
   );
 }

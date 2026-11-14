@@ -88,7 +88,7 @@ export const SILHOUETTE_TYPES: readonly SilhouetteType[] = [
 ];
 
 const CAP_SAMPLES = 11;
-const BODY_DEPTH = 2.3; // cells below the head line, hidden behind the rows in front
+export const BODY_DEPTH = 2.3; // cells below the head line, hidden behind the rows in front
 
 export function buildOutline(random: RandomSource, silhouette: Silhouette, cell: number): Outline {
   const leanAmount = between(random, -0.3, 0.3);

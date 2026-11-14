@@ -1,4 +1,4 @@
-import { faceTransform } from "@/components/crowd/faceTransform";
+import { mixRgb, parseHexColor, rgbToCss, type Rgb } from "@/components/crowd/crowdColors";
 import { HAPPY_THRESHOLD, type CelebrationPose } from "@/domain/crowd/celebration";
 import type { Figure } from "@/domain/crowd/figure";
 import type { IdlePose } from "@/domain/crowd/idle";
@@ -7,21 +7,16 @@ import type { FigurePose } from "@/domain/crowd/influence";
 
 export type FigureEntry = {
   figure: Figure;
-  body: SVGGElement;
-  outline: SVGPathElement;
-  arms: SVGGElement;
-  armLeft: SVGPathElement;
-  armRight: SVGPathElement;
-  face: SVGGElement;
-  seriousFace: SVGGElement;
-  happyFace: SVGGElement;
-  seriousEyes: SVGGElement;
-  happyEyes: SVGGElement;
+  outline: Path2D;
+  arm: Path2D;
+  eyes: Path2D;
+  lines: Path2D;
+  happyEyes: Path2D;
+  happyLines: Path2D;
+  color: Rgb;
+  partyColor: Rgb;
   influence: number;
-  active: boolean;
-  armsVisible: boolean;
-  happy: boolean;
-  fill: string;
+  entranceDelay: number;
 };
 
 export type FigureFrame = {
@@ -32,111 +27,94 @@ export type FigureFrame = {
   idle: IdlePose;
 };
 
-function outlineFill(figure: Figure, influence: number, envelope: number): string {
-  const hoverPercentage = roundCoordinate(influence * 100);
-  const hoverFill = `color-mix(in srgb, var(--color-background), ${figure.color} ${hoverPercentage}%)`;
-  return envelope > 0
-    ? `color-mix(in srgb, ${hoverFill}, ${figure.partyColor} ${roundCoordinate(envelope * 100)}%)`
-    : hoverFill;
-}
+export type FigurePaint = {
+  ctx: CanvasRenderingContext2D;
+  pivotY: number;
+  strokeWidth: number;
+  background: Rgb;
+  entrance: number;
+};
 
-function findPart<T extends Element>(element: Element | undefined, id: string, part: string): T {
-  const result = element?.querySelector<T>(`[data-part="${part}"]`);
-  if (!result) {
-    throw new Error(`Figure "${id}" missing part "${part}"`);
-  }
-  return result;
-}
-
-export function createEntry(figure: Figure, elements: Map<string | undefined, SVGGElement>): FigureEntry {
-  const element = elements.get(figure.id);
+export function createEntry(figure: Figure, entranceDelay: number): FigureEntry {
   return {
     figure,
-    body: findPart<SVGGElement>(element, figure.id, "body"),
-    outline: findPart<SVGPathElement>(element, figure.id, "outline"),
-    arms: findPart<SVGGElement>(element, figure.id, "arms"),
-    armLeft: findPart<SVGPathElement>(element, figure.id, "arm-left"),
-    armRight: findPart<SVGPathElement>(element, figure.id, "arm-right"),
-    face: findPart<SVGGElement>(element, figure.id, "face"),
-    seriousFace: findPart<SVGGElement>(element, figure.id, "serious-face"),
-    happyFace: findPart<SVGGElement>(element, figure.id, "happy-face"),
-    seriousEyes: findPart<SVGGElement>(element, figure.id, "serious-eyes"),
-    happyEyes: findPart<SVGGElement>(element, figure.id, "happy-eyes"),
+    outline: new Path2D(figure.outlinePath),
+    arm: new Path2D(figure.armPath),
+    eyes: new Path2D(figure.eyesPath),
+    lines: new Path2D(figure.linesPath),
+    happyEyes: new Path2D(figure.happyEyesPath),
+    happyLines: new Path2D(figure.happyLinesPath),
+    color: parseHexColor(figure.color),
+    partyColor: parseHexColor(figure.partyColor),
     influence: 0,
-    active: false,
-    armsVisible: false,
-    happy: false,
-    fill: "",
+    entranceDelay,
   };
 }
 
-function setTransform(element: SVGElement, transform: string): void {
-  if (element.getAttribute("transform") !== transform) {
-    element.setAttribute("transform", transform);
-  }
+function outlineFill(entry: FigureEntry, influence: number, envelope: number, background: Rgb): string {
+  if (influence === 0 && envelope === 0) return rgbToCss(background);
+  const hover = mixRgb(background, entry.color, influence);
+  return rgbToCss(envelope > 0 ? mixRgb(hover, entry.partyColor, envelope) : hover);
 }
 
-function roundScale(value: number): number {
-  return Math.round(value * 1000) / 1000;
-}
-
-// Per-frame updates of dozens of figures must not go through React state.
-export function applyFrame(entry: FigureEntry, frame: FigureFrame, pivotY: number): void {
+export function drawFigure(
+  entry: FigureEntry, frame: FigureFrame, paint: FigurePaint, entranceOrigin: { x: number; y: number },
+): void {
+  const { ctx, pivotY, strokeWidth, background, entrance } = paint;
+  const { figure } = entry;
   const { hover, party, idle } = frame;
   const idleAmount = 1 - Math.max(frame.influence, frame.envelope);
   const offset = roundCoordinate(hover.offsetY - party.hop + idle.offsetY * idleAmount);
   const rotation = roundCoordinate(hover.rotation + party.wiggle + idle.rotation * idleAmount);
-  const scaleY = roundScale(1 + (idle.scaleY - 1) * idleAmount);
-  setTransform(entry.body, `translate(0 ${offset}) rotate(${rotation} 0 ${pivotY}) ` +
-    `translate(0 ${pivotY}) scale(1 ${scaleY}) translate(0 ${-pivotY})`);
-  setTransform(entry.face, faceTransform(entry.figure,
-    hover.lookX + idle.lookX * idleAmount, hover.lookY + idle.lookY * idleAmount));
-  const blink = `scale(1 ${roundScale(idle.blink)})`;
-  setTransform(entry.seriousEyes, blink);
-  setTransform(entry.happyEyes, blink);
-  const fill = frame.influence === 0 && frame.envelope === 0
-    ? "" : outlineFill(entry.figure, frame.influence, frame.envelope);
-  if (fill !== entry.fill) {
-    entry.outline.style.fill = fill;
-    entry.fill = fill;
+  const scaleY = Math.round((1 + (idle.scaleY - 1) * idleAmount) * 1000) / 1000;
+  const radians = Math.PI / 180;
+  ctx.save();
+  if (entrance !== 1) {
+    ctx.globalAlpha = entrance;
+    ctx.translate(entranceOrigin.x, entranceOrigin.y);
+    ctx.translate(0, 18 * (1 - entrance));
+    const scale = 0.94 + 0.06 * entrance;
+    ctx.scale(scale, scale);
+    ctx.translate(-entranceOrigin.x, -entranceOrigin.y);
   }
+  ctx.translate(figure.x, figure.y);
+  ctx.translate(0, offset);
+  ctx.translate(0, pivotY);
+  ctx.rotate(rotation * radians);
+  ctx.scale(1, scaleY);
+  ctx.translate(0, -pivotY);
+  ctx.lineWidth = strokeWidth;
+  ctx.fillStyle = outlineFill(entry, frame.influence, frame.envelope, background);
+  ctx.fill(entry.outline);
+  ctx.stroke(entry.outline);
   const celebrating = frame.envelope > 0;
   const leftReach = celebrating ? party.armReach : idle.leftArmReach * idleAmount;
   const rightReach = celebrating ? party.armReach : idle.rightArmReach * idleAmount;
-  const armsVisible = leftReach > 0.01 || rightReach > 0.01;
-  if (armsVisible !== entry.armsVisible) {
-    entry.arms.setAttribute("visibility", armsVisible ? "visible" : "hidden");
-    entry.armsVisible = armsVisible;
+  const leftRotation = celebrating ? party.leftArmRotation : idle.leftArmRotation;
+  const rightRotation = celebrating ? party.rightArmRotation : idle.rightArmRotation;
+  ctx.fillStyle = figure.handColor;
+  for (const [x, reach, armRotation] of [
+    [figure.armLeftX, leftReach, leftRotation], [figure.armRightX, rightReach, rightRotation],
+  ]) {
+    if (reach <= 0.01) continue;
+    ctx.save();
+    ctx.translate(x, figure.armY);
+    ctx.rotate(roundCoordinate(armRotation) * radians);
+    const armScale = Math.round(reach * 1000) / 1000;
+    ctx.scale(armScale, armScale);
+    ctx.fill(entry.arm);
+    ctx.stroke(entry.arm);
+    ctx.restore();
   }
-  if (armsVisible) {
-    const { armLeftX, armRightX, armY } = entry.figure;
-    const leftRotation = celebrating ? party.leftArmRotation : idle.leftArmRotation;
-    const rightRotation = celebrating ? party.rightArmRotation : idle.rightArmRotation;
-    setTransform(entry.armLeft, `translate(${armLeftX} ${armY}) ` +
-      `rotate(${roundCoordinate(leftRotation)}) scale(${roundScale(leftReach)})`);
-    setTransform(entry.armRight, `translate(${armRightX} ${armY}) ` +
-      `rotate(${roundCoordinate(rightRotation)}) scale(${roundScale(rightReach)})`);
-  }
+  ctx.translate(roundCoordinate(figure.faceX + hover.lookX + idle.lookX * idleAmount),
+    roundCoordinate(figure.faceY + hover.lookY + idle.lookY * idleAmount));
+  ctx.rotate(figure.faceTilt * radians);
   const happy = frame.envelope > HAPPY_THRESHOLD || (idle.smile && idleAmount > 0.5);
-  if (happy !== entry.happy) {
-    entry.seriousFace.setAttribute("visibility", happy ? "hidden" : "visible");
-    entry.happyFace.setAttribute("visibility", happy ? "visible" : "hidden");
-    entry.happy = happy;
-  }
-  entry.active = true;
-}
-
-export function resetEntry(entry: FigureEntry): void {
-  entry.body.removeAttribute("transform");
-  entry.face.setAttribute("transform", faceTransform(entry.figure, 0, 0));
-  entry.seriousEyes.removeAttribute("transform");
-  entry.happyEyes.removeAttribute("transform");
-  entry.outline.style.removeProperty("fill");
-  entry.arms.setAttribute("visibility", "hidden");
-  entry.happyFace.setAttribute("visibility", "hidden");
-  entry.seriousFace.setAttribute("visibility", "visible");
-  entry.active = false;
-  entry.armsVisible = false;
-  entry.happy = false;
-  entry.fill = "";
+  ctx.save();
+  ctx.scale(1, Math.round(idle.blink * 1000) / 1000);
+  ctx.lineWidth = happy ? strokeWidth : figure.eyeWidth;
+  ctx.stroke(happy ? entry.happyEyes : entry.eyes);
+  ctx.restore();
+  ctx.stroke(happy ? entry.happyLines : entry.lines);
+  ctx.restore();
 }
